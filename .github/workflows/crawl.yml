@@ -1,0 +1,77 @@
+name: Crawl products
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run crawler part ${{ matrix.part }}
+        run: python crawl_products_${{ matrix.part }}.py
+
+      - name: Stage part ${{ matrix.part }} output
+        run: |
+          mkdir -p stage
+          [ -f "output/product_${{ matrix.part }}.csv" ] && cp "output/product_${{ matrix.part }}.csv" stage/
+          [ -f "retry_links_${{ matrix.part }}.csv" ] && cp "retry_links_${{ matrix.part }}.csv" stage/
+
+      - name: Upload part ${{ matrix.part }} output
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-output-${{ matrix.part }}
+          path: stage
+          if-no-files-found: warn
+
+  commit:
+    needs: crawl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all parts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: crawl-output-*
+          path: output/parts
+
+      - name: Merge parts into repo layout
+        run: |
+          for i in 1 2 3 4 5 6; do
+            src="output/parts/crawl-output-$i/product_$i.csv"
+            [ -f "$src" ] && cp "$src" "output/product_$i.csv"
+            src="output/parts/crawl-output-$i/retry_links_$i.csv"
+            [ -f "$src" ] && cp "$src" "retry_links_$i.csv"
+          done
+          rm -rf output/parts
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for i in 1 2 3 4 5 6; do
+            [ -f "output/product_$i.csv" ] && git add "output/product_$i.csv"
+            [ -f "retry_links_$i.csv" ] && git add "retry_links_$i.csv"
+          done
+          git diff --cached --quiet || git commit -m "Update crawl output"
+          git push
