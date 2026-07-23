@@ -32,9 +32,13 @@ jobs:
 
       - name: Stage part ${{ matrix.part }} output
         run: |
-          mkdir -p stage
-          [ -f "output/product_${{ matrix.part }}.csv" ] && cp "output/product_${{ matrix.part }}.csv" stage/
-          [ -f "retry_links_${{ matrix.part }}.csv" ] && cp "retry_links_${{ matrix.part }}.csv" stage/
+          mkdir -p stage output
+          if [ -f "output/product_${{ matrix.part }}.csv" ]; then
+            cp "output/product_${{ matrix.part }}.csv" stage/
+          fi
+          if [ -f "retry_links_${{ matrix.part }}.csv" ]; then
+            cp "retry_links_${{ matrix.part }}.csv" stage/
+          fi
 
       - name: Upload part ${{ matrix.part }} output
         uses: actions/upload-artifact@v4
@@ -59,9 +63,13 @@ jobs:
         run: |
           for i in 1 2 3 4 5 6; do
             src="output/parts/crawl-output-$i/product_$i.csv"
-            [ -f "$src" ] && cp "$src" "output/product_$i.csv"
+            if [ -f "$src" ]; then
+              cp "$src" "output/product_$i.csv"
+            fi
             src="output/parts/crawl-output-$i/retry_links_$i.csv"
-            [ -f "$src" ] && cp "$src" "retry_links_$i.csv"
+            if [ -f "$src" ]; then
+              cp "$src" "retry_links_$i.csv"
+            fi
           done
           rm -rf output/parts
 
@@ -70,8 +78,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           for i in 1 2 3 4 5 6; do
-            [ -f "output/product_$i.csv" ] && git add "output/product_$i.csv"
-            [ -f "retry_links_$i.csv" ] && git add "retry_links_$i.csv"
+            if [ -f "output/product_$i.csv" ]; then
+              git add "output/product_$i.csv"
+            fi
+            if [ -f "retry_links_$i.csv" ]; then
+              git add "retry_links_$i.csv"
+            fi
           done
           git diff --cached --quiet || git commit -m "Update crawl output"
           git push
