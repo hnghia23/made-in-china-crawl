@@ -1,0 +1,62 @@
+name: Debug crawl companies
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Only crawl the first N companies from company.csv (empty = all)"
+        required: false
+        default: "3"
+      browser_mode:
+        description: "headless = like Airflow; xvfb = headed Chromium on a virtual display"
+        required: true
+        default: "headless"
+        type: choice
+        options:
+          - headless
+          - xvfb
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: 27102026
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run fix_crawl_companies (${{ inputs.browser_mode }})
+        run: |
+          args="--output company_output.csv"
+          if [ -n "${{ inputs.limit }}" ]; then
+            args="$args --limit ${{ inputs.limit }}"
+          fi
+          if [ "${{ inputs.browser_mode }}" = "headless" ]; then
+            python fix_crawl_companies.py $args --headless
+          else
+            xvfb-run --auto-servernum python fix_crawl_companies.py $args
+          fi
+
+      - name: Upload output and debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-companies-${{ inputs.browser_mode }}
+          path: |
+            27102026/company_output.csv
+            27102026/debug/
+          if-no-files-found: warn
