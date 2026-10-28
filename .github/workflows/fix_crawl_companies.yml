@@ -3,6 +3,10 @@ name: Debug crawl companies
 on:
   workflow_dispatch:
     inputs:
+      company_urls:
+        description: "Company URLs separated by commas (empty = use 27102026/company.csv in repo)"
+        required: false
+        default: ""
       limit:
         description: "Only crawl the first N companies from company.csv (empty = all)"
         required: false
@@ -39,6 +43,20 @@ jobs:
 
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
+
+      - name: Prepare company.csv
+        env:
+          COMPANY_URLS: ${{ inputs.company_urls }}
+        run: |
+          if [ -n "$COMPANY_URLS" ]; then
+            echo "company_url" > company.csv
+            echo "$COMPANY_URLS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' >> company.csv
+          fi
+          if [ ! -f company.csv ]; then
+            echo "::error::27102026/company.csv not found - commit it or pass company_urls input"
+            exit 1
+          fi
+          cat company.csv
 
       - name: Run fix_crawl_companies (${{ inputs.browser_mode }})
         run: |
