@@ -32,6 +32,8 @@ MIC_EMAIL = os.environ.get("MIC_EMAIL", "hnghiapy.work@gmail.com")
 MIC_PASSWORD = os.environ.get("MIC_PASSWORD", "hnghia002")
 
 COMPANY_DETAIL_TIMEOUT = 90
+# Max seconds to wait for the login form (lets a Cloudflare challenge auto-pass).
+LOGIN_FORM_TIMEOUT = 60
 COMPANY_PAGE_RECYCLE_EVERY = 50
 
 OUTPUT_COLUMNS = [
@@ -152,12 +154,22 @@ async def login_to_mic(page, email, password):
     await login_screenshot(page, "page_loaded")
 
     username_input = page.locator("input[autocomplete='username']")
-    try:
-        await username_input.wait_for(state="visible", timeout=15000)
-    except Exception:
-        # e.g. Cloudflare "Just a moment..." challenge instead of the login form
-        await login_screenshot(page, "username_not_visible")
-        raise
+    # Give a Cloudflare "Just a moment..." challenge up to LOGIN_FORM_TIMEOUT to
+    # pass on its own; screenshot every 15s to see whether it changes.
+    waited = 0
+    while True:
+        try:
+            await username_input.wait_for(state="visible", timeout=15000)
+            print(f"[LOGIN] Login form visible after ~{waited}s, title={await page.title()!r}")
+            break
+        except Exception:
+            waited += 15
+            print(f"[LOGIN] Login form not visible after {waited}s, title={await page.title()!r}")
+            await login_screenshot(page, f"waiting_{waited}s")
+            if waited >= LOGIN_FORM_TIMEOUT:
+                # e.g. Cloudflare challenge never passed
+                await login_screenshot(page, "username_not_visible")
+                raise
     # Same readonly-until-focused pattern as the password field below - click first for reliability.
     await username_input.click()
     try:
