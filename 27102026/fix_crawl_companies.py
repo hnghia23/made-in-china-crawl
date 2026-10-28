@@ -11,7 +11,9 @@ Usage:
 """
 import argparse
 import asyncio
+import math
 import os
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -32,8 +34,10 @@ MIC_EMAIL = os.environ.get("MIC_EMAIL", "hnghiapy.work@gmail.com")
 MIC_PASSWORD = os.environ.get("MIC_PASSWORD", "hnghia002")
 
 COMPANY_DETAIL_TIMEOUT = 90
-# Max seconds to wait for the login form (lets a Cloudflare challenge auto-pass).
-LOGIN_FORM_TIMEOUT = 60
+# Cloudflare "Verify you are human" checkbox on the login page: how many times to
+# click it, and how long (ms) to wait for the login form after each click.
+CLOUDFLARE_MAX_CLICKS = 3
+CLOUDFLARE_SOLVE_TIMEOUT = 20000
 COMPANY_PAGE_RECYCLE_EVERY = 50
 
 OUTPUT_COLUMNS = [
@@ -147,6 +151,113 @@ async def login_screenshot(page, step):
         print(f"[LOGIN] Could not take screenshot for step {step}: {e}")
 
 
+async def human_click(page, target_x, target_y):
+    """Move the mouse along a randomized human-like curved path and click
+    (async port of solve_altcha.py)."""
+    viewport = page.viewport_size or {"width": 1280, "height": 720}
+    start_x = random.uniform(0, viewport["width"])
+    start_y = random.uniform(0, viewport["height"])
+    await page.mouse.move(start_x, start_y)
+    await page.wait_for_timeout(random.randint(150, 400))  # time to "notice" the page
+    await page.mouse.move(start_x + random.uniform(-30, 30), start_y + random.uniform(-20, 20))
+    await page.wait_for_timeout(random.randint(100, 300))  # idle wiggle before committing
+
+    # randomized cubic-Bezier path with an ease-in-out speed profile and fading jitter
+    distance = math.hypot(target_x - start_x, target_y - start_y)
+    steps = max(15, min(40, int(distance / 8)))
+    bow = random.uniform(0.15, 0.35) * distance * random.choice((-1, 1))
+    mid_x = (start_x + target_x) / 2 + random.uniform(-bow, bow)
+    mid_y = (start_y + target_y) / 2 + random.uniform(-bow, bow)
+    c1x = start_x + (mid_x - start_x) * random.uniform(0.3, 0.6)
+    c1y = start_y + (mid_y - start_y) * random.uniform(0.3, 0.6)
+    c2x = target_x + (mid_x - target_x) * random.uniform(0.3, 0.6)
+    c2y = target_y + (mid_y - target_y) * random.uniform(0.3, 0.6)
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        e = 4 * t ** 3 if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+        x = (1 - e) ** 3 * start_x + 3 * (1 - e) ** 2 * e * c1x + 3 * (1 - e) * e ** 2 * c2x + e ** 3 * target_x
+        y = (1 - e) ** 3 * start_y + 3 * (1 - e) ** 2 * e * c1y + 3 * (1 - e) * e ** 2 * c2y + e ** 3 * target_y
+        jitter = 1.5 * (1 - t)
+        await page.mouse.move(x + random.uniform(-jitter, jitter), y + random.uniform(-jitter, jitter))
+        await page.wait_for_timeout(random.randint(4, 16))
+    await page.mouse.move(target_x, target_y)
+
+    await page.wait_for_timeout(random.randint(80, 220))  # brief hover before pressing
+    await page.mouse.down()
+    await page.wait_for_timeout(random.randint(40, 130))  # press duration
+    await page.mouse.up()
+
+
+async def find_cloudflare_checkbox(page):
+    """Return (x, y) of the "Verify you are human" checkbox, or None.
+
+    The checkbox lives in a cross-origin challenges.cloudflare.com iframe inside a
+    closed shadow root, so it can't be located directly - use the iframe's box
+    instead (checkbox sits ~22px from the widget's left edge, vertically centered)."""
+    for frame in page.frames:
+        if "challenges.cloudflare.com" not in frame.url:
+            continue
+        try:
+            element = await frame.frame_element()
+            box = await element.bounding_box()
+        except Exception:
+            continue
+        if box and box["width"] > 50 and box["height"] > 20:
+            print(f"[CLOUDFLARE] Widget box from iframe: {box}")
+            return (
+                box["x"] + 22 + random.uniform(-4, 4),
+                box["y"] + box["height"] / 2 + random.uniform(-4, 4),
+            )
+
+    # Fallback: the shadow-host div sits next to the hidden cf-turnstile-response
+    # input (random ids per page), so their common parent has the widget's box.
+    try:
+        container = page.locator("input[name='cf-turnstile-response']").first.locator("xpath=..")
+        box = await container.bounding_box()
+    except Exception:
+        box = None
+    if box and box["width"] > 50 and box["height"] > 20:
+        print(f"[CLOUDFLARE] Widget box from cf-turnstile-response container: {box}")
+        return (
+            box["x"] + 22 + random.uniform(-4, 4),
+            box["y"] + box["height"] / 2 + random.uniform(-4, 4),
+        )
+    return None
+
+
+async def solve_cloudflare_challenge(page, timeout=CLOUDFLARE_SOLVE_TIMEOUT):
+    """Click the Cloudflare checkbox like a human until the login form shows up.
+    Returns True when the challenge page is gone."""
+    username_input = page.locator("input[autocomplete='username']")
+    for attempt in range(1, CLOUDFLARE_MAX_CLICKS + 1):
+        # The widget iframe takes a few seconds to render after the page loads.
+        position = None
+        for _ in range(10):
+            position = await find_cloudflare_checkbox(page)
+            if position:
+                break
+            await page.wait_for_timeout(1000)
+        if not position:
+            print(f"[CLOUDFLARE] Attempt {attempt}: checkbox iframe not found")
+            await login_screenshot(page, f"cf_no_checkbox_{attempt}")
+            return False
+
+        print(f"[CLOUDFLARE] Attempt {attempt}: clicking checkbox at ({position[0]:.0f}, {position[1]:.0f})")
+        await human_click(page, *position)
+        await page.wait_for_timeout(2000)
+        await login_screenshot(page, f"cf_after_click_{attempt}")
+
+        try:
+            await username_input.wait_for(state="visible", timeout=timeout)
+            print(f"[CLOUDFLARE] Challenge passed after {attempt} click(s), title={await page.title()!r}")
+            return True
+        except Exception:
+            print(f"[CLOUDFLARE] Attempt {attempt}: still blocked, title={await page.title()!r}")
+            await login_screenshot(page, f"cf_still_blocked_{attempt}")
+    return False
+
+
 async def login_to_mic(page, email, password):
     print(f"[LOGIN] Opening login page: {MIC_LOGIN_URL}")
     response = await page.goto(MIC_LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
@@ -154,22 +265,17 @@ async def login_to_mic(page, email, password):
     await login_screenshot(page, "page_loaded")
 
     username_input = page.locator("input[autocomplete='username']")
-    # Give a Cloudflare "Just a moment..." challenge up to LOGIN_FORM_TIMEOUT to
-    # pass on its own; screenshot every 15s to see whether it changes.
-    waited = 0
-    while True:
-        try:
-            await username_input.wait_for(state="visible", timeout=15000)
-            print(f"[LOGIN] Login form visible after ~{waited}s, title={await page.title()!r}")
-            break
-        except Exception:
-            waited += 15
-            print(f"[LOGIN] Login form not visible after {waited}s, title={await page.title()!r}")
-            await login_screenshot(page, f"waiting_{waited}s")
-            if waited >= LOGIN_FORM_TIMEOUT:
-                # e.g. Cloudflare challenge never passed
-                await login_screenshot(page, "username_not_visible")
-                raise
+    try:
+        await username_input.wait_for(state="visible", timeout=15000)
+        print(f"[LOGIN] Login form visible, title={await page.title()!r}")
+    except Exception:
+        # Cloudflare "Just a moment..." page with an interactive "Verify you are human"
+        # checkbox (it never auto-passes, see debug/login/*waiting*.png).
+        print(f"[LOGIN] Login form not visible, title={await page.title()!r} - trying Cloudflare checkbox")
+        await login_screenshot(page, "cloudflare_challenge")
+        if not await solve_cloudflare_challenge(page):
+            await login_screenshot(page, "username_not_visible")
+            raise
     # Same readonly-until-focused pattern as the password field below - click first for reliability.
     await username_input.click()
     try:
