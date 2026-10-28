@@ -1,0 +1,75 @@
+name: Debug crawl url list
+
+on:
+  workflow_dispatch:
+    inputs:
+      listing_limit:
+        description: "Only crawl the first N listings of LISTING_URL (empty = all)"
+        required: false
+        default: "3"
+      listing:
+        description: "Only crawl listings whose URL contains this text, e.g. Excavator (empty = no filter)"
+        required: false
+        default: ""
+      max_pages:
+        description: "Override max pages per listing (empty = value in LISTING_URL)"
+        required: false
+        default: ""
+      browser_mode:
+        description: "headless = like Airflow; xvfb = headed Chromium on a virtual display"
+        required: true
+        default: "headless"
+        type: choice
+        options:
+          - headless
+          - xvfb
+
+jobs:
+  crawl:
+    # ubuntu-latest is now 26.04, which Playwright 1.59 can't install browser deps for
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: 27102026
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pandas==2.2.3 playwright==1.59.0
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run fix_crawl_url_list (${{ inputs.browser_mode }})
+        env:
+          LISTING_LIMIT: ${{ inputs.listing_limit }}
+          LISTING_FILTER: ${{ inputs.listing }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+        run: |
+          args="--output url_list_output.csv"
+          if [ -n "$LISTING_LIMIT" ]; then args="$args --listing-limit $LISTING_LIMIT"; fi
+          if [ -n "$LISTING_FILTER" ]; then args="$args --listing $LISTING_FILTER"; fi
+          if [ -n "$MAX_PAGES" ]; then args="$args --max-pages $MAX_PAGES"; fi
+          if [ "${{ inputs.browser_mode }}" = "headless" ]; then
+            python fix_crawl_url_list.py $args --headless
+          else
+            xvfb-run --auto-servernum python fix_crawl_url_list.py $args
+          fi
+
+      - name: Upload output and debug files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-url-list-${{ inputs.browser_mode }}
+          path: |
+            27102026/url_list_output.csv
+            27102026/url_list_output_pages.csv
+            27102026/debug/listing/
+          if-no-files-found: warn
